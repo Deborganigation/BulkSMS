@@ -20,7 +20,7 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          flutter-version: '3.19.0'
           channel: 'stable'
       
       - name: Create Flutter Project
@@ -28,13 +28,17 @@ jobs:
           flutter create --project-name bulksms --org com.bulksms temp_project
           cp -r temp_project/android .
           cp -r temp_project/ios 2>/dev/null || true
-          cp -r temp_project/linux 2>/dev/null || true
-          cp -r temp_project/macos 2>/dev/null || true
-          cp -r temp_project/windows 2>/dev/null || true
-          cp -r temp_project/web 2>/dev/null || true
           cp temp_project/.metadata .
           cp temp_project/analysis_options.yaml .
           rm -rf temp_project
+      
+      - name: Update Kotlin Version
+        run: |
+          sed -i 's/id "org.jetbrains.kotlin.android" version "1.8.22"/id "org.jetbrains.kotlin.android" version "1.9.22"/' android/settings.gradle
+      
+      - name: Update Compile SDK
+        run: |
+          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 35/' android/app/build.gradle
       
       - name: Update Android Manifest
         run: |
@@ -72,14 +76,171 @@ jobs:
           </manifest>
           EOF
       
-      - name: Get dependencies
-        run: flutter pub get
-      
-      - name: Build APK
-        run: flutter build apk --release
-      
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+      - name: Fix Dart Code
+        run: |
+          cat > lib/main.dart << 'DARTEOF'
+          import 'dart:io';
+          import 'dart:convert';
+          import 'package:flutter/material.dart';
+          import 'package:file_picker/file_picker.dart';
+          import 'package:csv/csv.dart';
+          import 'package:permission_handler/permission_handler.dart';
+          import 'package:telephony/telephony.dart';
+          
+          void main() {
+            runApp(const BulkSMSApp());
+          }
+          
+          class BulkSMSApp extends StatelessWidget {
+            const BulkSMSApp({super.key});
+          
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'Bulk SMS Sender',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(
+                  primarySwatch: Colors.blue,
+                  useMaterial3: true,
+                ),
+                home: const BulkSMSHome(),
+              );
+            }
+          }
+          
+          class Contact {
+            String name;
+            String phone;
+            String status;
+          
+            Contact({required this.name, required this.phone, this.status = 'pending'});
+          }
+          
+          class BulkSMSHome extends StatefulWidget {
+            const BulkSMSHome({super.key});
+          
+            @override
+            State<BulkSMSHome> createState() => _BulkSMSHomeState();
+          }
+          
+          class _BulkSMSHomeState extends State<BulkSMSHome> {
+            List<Contact> contacts = [];
+            final TextEditingController _messageController = TextEditingController();
+            final TextEditingController _delayController = TextEditingController(text: '5');
+            final Telephony telephony = Telephony.instance;
+            bool isSending = false;
+            int currentIndex = 0;
+            int sentCount = 0;
+            int failedCount = 0;
+          
+            @override
+            void initState() {
+              super.initState();
+              _requestPermissions();
+            }
+          
+            Future<void> _requestPermissions() async {
+              await Permission.sms.request();
+              await Permission.storage.request();
+              await Permission.phone.request();
+            }
+          
+            Future<void> _pickCSV() async {
+              try {
+                FilePickerResult? result = await FilePicker.platform.pickFiles(
+                  type: FileType.custom,
+                  allowedExtensions: ['csv'],
+                );
+          
+                if (result != null && result.files.single.path != null) {
+                  String filePath = result.files.single.path!;
+                  await _parseCSV(filePath);
+                }
+              } catch (e) {
+                _showAlert('Error: $e');
+              }
+            }
+          
+            Future<void> _parseCSV(String filePath) async {
+              try {
+                final input = File(filePath).openRead();
+                final fields = await input
+                    .transform(utf8.decoder)
+                    .transform(const CsvToListConverter())
+                    .toList();
+          
+                setState(() {
+                  contacts = [];
+                  for (int i = 1; i < fields.length; i++) {
+                    if (fields[i].length >= 2) {
+                      String name = fields[i][0].toString();
+                      String phone = fields[i][1].toString().replaceAll(RegExp(r'\D'), '');
+                      
+                      if (phone.length == 10) {
+                        phone = '91$phone';
+                      }
+                      
+                      if (phone.length >= 10) {
+                        contacts.add(Contact(name: name, phone: phone));
+                      }
+                    }
+                  }
+                });
+          
+                _showAlert('✅ ${contacts.length} contacts loaded!');
+              } catch (e) {
+                _showAlert('Error parsing CSV: $e');
+              }
+            }
+          
+            Future<void> _startSending() async {
+              if (contacts.isEmpty) {
+                _showAlert('No contacts loaded!');
+                return;
+              }
+          
+              if (_messageController.text.trim().isEmpty) {
+                _showAlert('Please type a message!');
+                return;
+              }
+          
+              bool? confirm = await showDialog<bool>(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('Start Bulk Send?'),
+                  content: Text('Send to ${contacts.length} contacts?\n\nDelay: ${_delayController.text} sec'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      child: const Text('Cancel'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                      child: const Text('START', style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                ),
+              );
+          
+              if (confirm == true) {
+                setState(() {
+                  isSending = true;
+                  currentIndex = 0;
+                  sentCount = 0;
+                  failedCount = 0;
+                  for (var c in contacts) {
+                    c.status = 'pending';
+                  }
+                });
+          
+                _sendNext();
+              }
+            }
+          
+            Future<void> _sendNext() async {
+              if (!isSending || currentIndex >= contacts.length) {
+                setState(() {
+                  isSending = false;
+                });
+                _showAlert('Complete! Sent: $sentCount, Failed:
