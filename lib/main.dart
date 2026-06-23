@@ -1,0 +1,445 @@
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:csv/csv.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:telephony/telephony.dart';
+
+void main() {
+  runApp(const BulkSMSApp());
+}
+
+class BulkSMSApp extends StatelessWidget {
+  const BulkSMSApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Bulk SMS Sender',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        useMaterial3: true,
+      ),
+      home: const BulkSMSHome(),
+    );
+  }
+}
+
+class Contact {
+  String name;
+  String phone;
+  String status;
+
+  Contact({required this.name, required this.phone, this.status = 'pending'});
+}
+
+class BulkSMSHome extends StatefulWidget {
+  const BulkSMSHome({super.key});
+
+  @override
+  State<BulkSMSHome> createState() => _BulkSMSHomeState();
+}
+
+class _BulkSMSHomeState extends State<BulkSMSHome> {
+  List<Contact> contacts = [];
+  final TextEditingController _messageController = TextEditingController();
+  final TextEditingController _delayController = TextEditingController(text: '5');
+  final Telephony telephony = Telephony.instance;
+  bool isSending = false;
+  int currentIndex = 0;
+  int sentCount = 0;
+  int failedCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _requestPermissions();
+  }
+
+  Future<void> _requestPermissions() async {
+    await Permission.sms.request();
+    await Permission.storage.request();
+    await Permission.phone.request();
+  }
+
+  Future<void> _pickCSV() async {
+    try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['csv'],
+      );
+
+      if (result != null && result.files.single.path != null) {
+        String filePath = result.files.single.path!;
+        await _parseCSV(filePath);
+      }
+    } catch (e) {
+      _showAlert('Error: \$e');
+    }
+  }
+
+  Future<void> _parseCSV(String filePath) async {
+    try {
+      final input = File(filePath).openRead();
+      final fields = await input
+          .transform(const Utf8Decoder())
+          .transform(const CsvToListConverter())
+          .toList();
+
+      setState(() {
+        contacts = [];
+        for (int i = 1; i < fields.length; i++) {
+          if (fields[i].length >= 2) {
+            String name = fields[i][0].toString();
+            String phone = fields[i][1].toString().replaceAll(RegExp(r'\D'), '');
+
+            if (phone.length == 10) {
+              phone = '91\$phone';
+            }
+
+            if (phone.length >= 10) {
+              contacts.add(Contact(name: name, phone: phone));
+            }
+          }
+        }
+      });
+
+      _showAlert('✅ \${contacts.length} contacts loaded!');
+    } catch (e) {
+      _showAlert('Error parsing CSV: \$e');
+    }
+  }
+
+  Future<void> _startSending() async {
+    if (contacts.isEmpty) {
+      _showAlert('No contacts loaded!');
+      return;
+    }
+
+    if (_messageController.text.trim().isEmpty) {
+      _showAlert('Please type a message!');
+      return;
+    }
+
+    bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Start Bulk Send?'),
+        content: Text('Send to \${contacts.length} contacts?
+
+Delay: \${_delayController.text} sec'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+            child: const Text('START', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      setState(() {
+        isSending = true;
+        currentIndex = 0;
+        sentCount = 0;
+        failedCount = 0;
+        for (var c in contacts) {
+          c.status = 'pending';
+        }
+      });
+
+      _sendNext();
+    }
+  }
+
+  Future<void> _sendNext() async {
+    if (!isSending || currentIndex >= contacts.length) {
+      setState(() {
+        isSending = false;
+      });
+      _showAlert('Complete! Sent: \$sentCount, Failed: \$failedCount');
+      return;
+    }
+
+    Contact contact = contacts[currentIndex];
+    String message = _messageController.text.replaceAll('{name}', contact.name);
+
+    try {
+      await telephony.sendSms(
+        to: contact.phone,
+        message: message,
+        isMultipart: message.length > 160,
+      );
+
+      setState(() {
+        contact.status = 'sent';
+        sentCount++;
+      });
+    } catch (e) {
+      setState(() {
+        contact.status = 'failed';
+        failedCount++;
+      });
+    }
+
+    setState(() {
+      currentIndex++;
+    });
+
+    int delay = int.tryParse(_delayController.text) ?? 5;
+    await Future.delayed(Duration(seconds: delay));
+
+    if (isSending) {
+      _sendNext();
+    }
+  }
+
+  void _stopSending() {
+    setState(() {
+      isSending = false;
+    });
+    _showAlert('Stopped!');
+  }
+
+  void _showAlert(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+      );
+    }
+  }
+
+  Color _getStatusColor(String status) {
+    switch (status) {
+      case 'sent':
+        return Colors.green.shade100;
+      case 'failed':
+        return Colors.red.shade100;
+      default:
+        return Colors.orange.shade100;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Bulk SMS Sender'),
+        backgroundColor: const Color(0xFF1A73E8),
+        foregroundColor: Colors.white,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade100,
+                borderRadius: BorderRadius.circular(8),
+                border: Border(left: BorderSide(color: Colors.orange, width: 4)),
+              ),
+              child: const Text(
+                'Use responsibly for personal contacts only',
+                style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            ElevatedButton.icon(
+              onPressed: isSending ? null : _pickCSV,
+              icon: const Icon(Icons.file_upload),
+              label: const Text('Import Contacts (CSV)'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1A73E8),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.all(16),
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            Text(
+              contacts.isEmpty ? 'No contacts loaded' : '\${contacts.length} contacts loaded',
+              style: TextStyle(
+                color: contacts.isEmpty ? Colors.grey : Colors.green,
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+
+            TextField(
+              controller: _messageController,
+              maxLines: 4,
+              decoration: InputDecoration(
+                hintText: 'Type message... Use {name} for contact name',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                contentPadding: const EdgeInsets.all(12),
+              ),
+              enabled: !isSending,
+            ),
+            const SizedBox(height: 8),
+
+            Text(
+              '\${_messageController.text.length} chars | \${_messageController.text.length <= 160 ? 1 : 2}+ SMS',
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+              textAlign: TextAlign.right,
+            ),
+            const SizedBox(height: 16),
+
+            TextField(
+              controller: _delayController,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                hintText: 'Delay in seconds (default: 5)',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                contentPadding: const EdgeInsets.all(12),
+              ),
+              enabled: !isSending,
+            ),
+            const SizedBox(height: 16),
+
+            if (isSending || sentCount > 0) ...[
+              LinearProgressIndicator(
+                value: contacts.isEmpty ? 0 : currentIndex / contacts.length,
+                backgroundColor: Colors.grey.shade300,
+                valueColor: const AlwaysStoppedAnimation<Color>(Colors.green),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Progress: \$currentIndex/\${contacts.length} | Sent: \$sentCount | Failed: \$failedCount',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+            ],
+
+            Text(
+              isSending ? 'Sending...' : 'Ready',
+              style: TextStyle(
+                color: isSending ? Colors.green : Colors.grey,
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: isSending ? null : _startSending,
+                    icon: const Icon(Icons.send),
+                    label: const Text('START'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.all(16),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: isSending ? _stopSending : null,
+                    icon: const Icon(Icons.stop),
+                    label: const Text('STOP'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.all(16),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            if (contacts.isNotEmpty) ...[
+              const Text(
+                'Contacts:',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              const SizedBox(height: 8),
+              ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: contacts.length,
+                itemBuilder: (context, index) {
+                  Contact contact = contacts[index];
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 4),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: _getStatusColor(contact.status),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border(
+                        left: BorderSide(
+                          color: contact.status == 'sent'
+                              ? Colors.green
+                              : contact.status == 'failed'
+                                  ? Colors.red
+                                  : Colors.orange,
+                          width: 4,
+                        ),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              contact.name,
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            Text(
+                              contact.phone,
+                              style: const TextStyle(color: Colors.grey, fontSize: 12),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          contact.status == 'sent'
+                              ? 'Sent'
+                              : contact.status == 'failed'
+                                  ? 'Failed'
+                                  : 'Pending',
+                          style: TextStyle(
+                            color: contact.status == 'sent'
+                                ? Colors.green
+                                : contact.status == 'failed'
+                                    ? Colors.red
+                                    : Colors.orange,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _messageController.dispose();
+    _delayController.dispose();
+    super.dispose();
+  }
+}
