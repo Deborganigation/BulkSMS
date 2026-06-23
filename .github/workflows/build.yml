@@ -20,7 +20,57 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.16.0'
+          flutter-version: '3.24.0'
+          channel: 'stable'
+      
+      - name: Create Flutter Project
+        run: |
+          flutter create --project-name bulksms --org com.bulksms temp_project
+          cp -r temp_project/android .
+          cp -r temp_project/ios 2>/dev/null || true
+          cp -r temp_project/linux 2>/dev/null || true
+          cp -r temp_project/macos 2>/dev/null || true
+          cp -r temp_project/windows 2>/dev/null || true
+          cp -r temp_project/web 2>/dev/null || true
+          cp temp_project/.metadata .
+          cp temp_project/analysis_options.yaml .
+          rm -rf temp_project
+      
+      - name: Update Android Manifest
+        run: |
+          cat > android/app/src/main/AndroidManifest.xml << 'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SEND_SMS" />
+              <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+              
+              <application
+                  android:label="Bulk SMS Sender"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                        android:name="io.flutter.embedding.android.NormalTheme"
+                        android:resource="@style/NormalTheme"
+                        />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+          </manifest>
+          EOF
       
       - name: Get dependencies
         run: flutter pub get
