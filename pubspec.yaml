@@ -1,0 +1,20 @@
+name: bulksms
+description: Bulk SMS Sender - Personal Use Only
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  file_picker: ^6.1.1
+  csv: ^5.1.1
+  permission_handler: ^11.0.1
+  telephony: ^0.2.0
+
+flutter:
+  uses-material-design: true
